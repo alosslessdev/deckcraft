@@ -85,6 +85,8 @@ pub(crate) struct RecordView {
     pub(super) notes_open: bool,
     /// Selected record view. Defined in [`views`] so the dropdown and the shell share it.
     pub(super) view: views::ViewKind,
+    /// Teleprompter auto-scroll state (speed and running flag).
+    pub(super) teleprompter: views::teleprompter::State,
     pub(super) views_open: bool,
     pub(super) more_open: bool,
     pub(super) ink: InkState,
@@ -111,6 +113,7 @@ impl Default for RecordView {
             notes_scroll: 0.0,
             notes_open: true,
             view: views::ViewKind::default(),
+            teleprompter: views::teleprompter::State::default(),
             views_open: false,
             more_open: false,
             ink: InkState::default(),
@@ -243,6 +246,8 @@ pub(crate) struct Layout {
     pub camera_preview: Rect,
     /// Presenter view's next-slide strip, below the notes pane. None in the other views.
     pub next: Option<Rect>,
+    /// Slide View's thumbnail rail, left of the canvas. None in the other views.
+    pub thumbs: Option<Rect>,
 }
 
 /// Horizontal margin shared by the chrome.
@@ -263,13 +268,21 @@ pub(super) fn layout(full: Rect, doc: &Presentation, rec: &RecordView) -> Layout
         Rect::NOTHING
     };
     let canvas = Rect::from_min_max(pos2(full.min.x + EDGE, notes.max.y + 12.0), pos2(full.max.x - EDGE, (bottom.min.y - 14.0).max(notes.max.y + 12.0)));
+    // Slide View adds a thumbnail rail on the left; the slide itself keeps the rest of the canvas.
+    let (canvas, thumbs) = if rec.view == views::ViewKind::Slide && canvas.width() > 160.0 {
+        let rail_w = (canvas.width() * 0.16).clamp(96.0, 148.0);
+        let rail = Rect::from_min_max(canvas.min, pos2(canvas.min.x + rail_w, canvas.max.y));
+        (Rect::from_min_max(pos2(rail.max.x + 12.0, canvas.min.y), canvas.max), Some(rail))
+    } else {
+        (canvas, None)
+    };
     let slide = if canvas.width() > 1.0 && canvas.height() > 1.0 { fit(canvas, doc) } else { Rect::from_min_size(canvas.min, vec2(0.0, 0.0)) };
     let radius = (slide.height() * 0.14).clamp(48.0, 120.0);
     let camera = Rect::from_center_size(pos2(slide.max.x - radius - 16.0, slide.max.y - radius - 16.0), vec2(radius * 2.0, radius * 2.0));
     let views = views_rect(bottom);
     let camera_preview = Rect::from_min_size(pos2(views.min.x - 44.0, views.min.y), vec2(30.0, 30.0));
     let next = (rec.view == views::ViewKind::Presenter).then_some(notes_below);
-    Layout { full, top, notes, slide, bottom, views, camera_preview, next }
+    Layout { full, top, notes, slide, bottom, views, camera_preview, next, thumbs }
 }
 
 fn top_rect(full: Rect) -> Rect {
@@ -315,7 +328,7 @@ pub(super) fn ui(app: &mut SlideApp, ui: &mut Ui, show: &mut Show, doc: &Arc<Pre
     keep &= !top.close;
     let _ = bottom::ui(ui, show, &mut rec, doc, now, layout);
     canvas::bubble(ui, &rec, layout);
-    let _ = views::ui(ui, &mut rec, layout);
+    let _ = views::ui(app, ui, show, doc, &mut rec, layout);
     if keep {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
