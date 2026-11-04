@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audio;
+pub mod capture;
 pub mod clip;
 pub mod feed;
 mod mp4guard;
@@ -29,6 +30,7 @@ mod yuv;
 use std::sync::Arc;
 
 pub use audio::{Pcm, wav_mono};
+pub use capture::{CameraIn, CaptureError, CaptureFrame, DeviceInfo, ScreenIn, ScreenInfo, ScreenRegion};
 pub use clip::ClipParams;
 pub use feed::VideoFeed;
 pub use player::{AudioOut, MicIn, PlayState, Player, VoiceSpec, VoiceStatus};

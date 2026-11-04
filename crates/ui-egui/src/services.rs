@@ -58,6 +58,13 @@ pub struct Services {
     pub clipboard_set_html: Option<Box<dyn FnMut(&str, &str) -> bool>>,
     /// Audio output for media playback (cpal on desktop); without one media plays silently.
     pub audio_out: Option<Box<dyn deckcraft_media::AudioOut>>,
-    /// Microphone for Record Slide Show (cpal on desktop). Without one, timings and ink are still kept.
-    pub mic: Option<Box<dyn deckcraft_media::MicIn>>,
+    /// Camera for the Record view (Media Foundation / AVFoundation on desktop). Without one the
+    /// camera control reports that capture is unavailable; it never pretends to be live.
+    pub camera: Option<std::rc::Rc<std::cell::RefCell<Box<dyn deckcraft_media::CameraIn>>>>,
+    /// Microphone for Record Slide Show and the Record view (cpal on desktop). Device lists,
+    /// selection and the live level come from the same host the narration take drains.
+    pub mic: Option<std::rc::Rc<std::cell::RefCell<Box<dyn deckcraft_media::MicIn>>>>,
+    /// Screen capture for the Record view. Without one the screen-recording control reports that
+    /// capture is unavailable.
+    pub screen: Option<std::rc::Rc<std::cell::RefCell<Box<dyn deckcraft_media::ScreenIn>>>>,
 }
