@@ -58,6 +58,8 @@ pub(super) struct DeviceState {
     /// Cached device list; `listed` distinguishes "not asked yet" from "asked, found none".
     devices: Vec<DeviceInfo>,
     listed: bool,
+    /// Why the last enumeration failed, shown in the menu without turning a live device off.
+    list_error: Option<CaptureError>,
     /// The last frame uploaded as a texture (camera and screen previews).
     texture: Option<TextureHandle>,
     /// Size of the last uploaded frame.
@@ -75,6 +77,7 @@ impl Default for DeviceState {
             message: None,
             devices: Vec::new(),
             listed: false,
+            list_error: None,
             texture: None,
             frame_size: None,
             started_at: None,
@@ -100,6 +103,37 @@ impl DeviceState {
         self.started_at = None;
     }
 
+    /// Replace the device list from one enumeration. A failure while the device is live is kept
+    /// as a list error: the stream still works, so the control must not flip to Off.
+    fn apply_list(&mut self, kind: &str, result: Result<Vec<DeviceInfo>, CaptureError>) {
+        match result {
+            Ok(list) => {
+                self.devices = list;
+                self.listed = true;
+                self.list_error = None;
+                if let Some(selected) = &self.selected
+                    && !self.devices.iter().any(|d| d.id == *selected)
+                {
+                    self.selected = None;
+                    self.message = Some(format!("The selected {kind} is no longer connected."));
+                }
+                if self.devices.is_empty() && self.status == DeviceStatus::Off {
+                    self.status = DeviceStatus::Unavailable;
+                    self.message = Some(CaptureError::Unavailable.message(kind));
+                } else if !self.devices.is_empty() && self.status == DeviceStatus::Unavailable {
+                    self.status = DeviceStatus::Off;
+                    self.message = None;
+                }
+            }
+            Err(error) => {
+                self.list_error = Some(error.clone());
+                if !self.is_on() {
+                    self.fail(kind, error);
+                }
+            }
+        }
+    }
+
     fn fail(&mut self, kind: &str, error: CaptureError) {
         let message = error.message(kind);
         self.status = match error {
@@ -111,6 +145,7 @@ impl DeviceState {
         };
         self.message = Some(message);
         self.started_at = None;
+        self.level = 0.0;
     }
 
     /// The one-line status shown in the menu and on hover.
@@ -159,9 +194,8 @@ pub(super) struct Devices {
     /// Monitors found when the picker opened.
     screens: Vec<ScreenInfo>,
     picker: Option<Picker>,
-    /// Latest captured frames, uploaded once by [`Devices::tick`].
+    /// Latest camera frame, uploaded once by [`Devices::tick`].
     camera_frame: Option<CaptureFrame>,
-    screen_frame: Option<CaptureFrame>,
     last_tick: f64,
 }
 
@@ -177,7 +211,6 @@ impl Default for Devices {
             screens: Vec::new(),
             picker: None,
             camera_frame: None,
-            screen_frame: None,
             last_tick: f64::NEG_INFINITY,
         }
     }
@@ -247,6 +280,8 @@ impl Devices {
         self.screen_host = Some(Rc::new(RefCell::new(host)));
         self.screen.status = DeviceStatus::Off;
         self.screen.message = None;
+        self.screen.listed = false;
+        self.screens.clear();
     }
 
     /// The latest camera picture, when the preview is visible. The texture is uploaded by
@@ -298,6 +333,11 @@ impl Devices {
         };
         if let Some(error) = failure {
             self.camera_frame = None;
+            if let Some(host) = &self.camera_host
+                && let Ok(mut host) = host.try_borrow_mut()
+            {
+                host.close();
+            }
             self.camera.fail("camera", error);
             return;
         }
@@ -334,10 +374,26 @@ impl Devices {
         };
         if let Some(error) = failure {
             self.mic.level = 0.0;
+            if let Some(host) = &self.mic_host
+                && let Ok(mut host) = host.try_borrow_mut()
+            {
+                host.stop();
+            }
             self.mic.fail("microphone", error);
             return;
         }
-        self.mic.level = (self.mic.level + (level.clamp(0.0, 1.0) - self.mic.level) * 0.6).clamp(0.0, 1.0);
+        if running && !self.mic.is_on() {
+            // Record Slide Show starts the same input for narration; the control must show the
+            // stream that is actually capturing, not a stale Off.
+            self.mic.status = DeviceStatus::On;
+            self.mic.message = None;
+            self.mic.started_at = Some(now);
+        }
+        if running && self.mic.status == DeviceStatus::On {
+            self.mic.level = (self.mic.level + (level.clamp(0.0, 1.0) - self.mic.level) * 0.6).clamp(0.0, 1.0);
+        } else {
+            self.mic.level = 0.0;
+        }
         if self.mic.status == DeviceStatus::On
             && !running
             && self.mic.started_at.is_some_and(|started| now - started > 0.3)
@@ -353,32 +409,37 @@ impl Devices {
             Err(_) => (None, None, false),
         };
         if let Some(error) = failure {
-            self.screen_frame = None;
+            if let Some(host) = &self.screen_host
+                && let Ok(mut host) = host.try_borrow_mut()
+            {
+                host.stop();
+            }
             self.screen.fail("screen", error);
             return;
         }
         if let Some(frame) = frame {
+            // No screen preview exists yet; draining the newest frame keeps a host from
+            // buffering full-monitor pictures it has nowhere to put.
             self.screen.frame_size = Some((frame.width, frame.height));
-            self.screen_frame = Some(frame);
         }
         if self.screen.status == DeviceStatus::Starting && running {
             self.screen.status = DeviceStatus::On;
             self.screen.message = None;
         }
-        if self.screen.status == DeviceStatus::On
-            && !running
-            && self.screen.started_at.is_some_and(|started| now - started > 0.3)
-        {
-            self.screen.stop_failed("screen", "Screen capture stopped.");
+        match self.screen.status {
+            DeviceStatus::Starting if self.screen.started_at.is_some_and(|started| now - started > 8.0) => {
+                self.screen.stop_failed("screen", "Screen capture did not start.");
+            }
+            DeviceStatus::On if !running && self.screen.started_at.is_some_and(|started| now - started > 0.3) => {
+                self.screen.stop_failed("screen", "Screen capture stopped.");
+            }
+            _ => {}
         }
     }
 
     fn upload(&mut self, ctx: &egui::Context) {
         if let Some(frame) = self.camera_frame.take() {
             upload_frame(&mut self.camera, ctx, "record.camera", frame);
-        }
-        if let Some(frame) = self.screen_frame.take() {
-            upload_frame(&mut self.screen, ctx, "record.screen", frame);
         }
     }
 
@@ -410,20 +471,25 @@ impl Devices {
                 return;
             }
             self.ensure_cameras();
+            if let Some(error) = &self.camera.list_error {
+                ui.label(RichText::new(error.message("camera")).size(11.0).color(WARN));
+            }
             let mut pick: Option<Option<String>> = None;
             if ui.selectable_label(self.camera.selected.is_none(), "System default").clicked() {
                 pick = Some(None);
             }
-            for device in &self.camera.devices {
-                if ui.selectable_label(self.camera.selected.as_deref() == Some(device.id.as_str()), &device.name).clicked() {
+            for (i, device) in self.camera.devices.iter().enumerate() {
+                let label = device_label(&self.camera.devices, i);
+                if ui.selectable_label(self.camera.selected.as_deref() == Some(device.id.as_str()), label).clicked() {
                     pick = Some(Some(device.id.clone()));
                 }
             }
-            if self.camera.devices.is_empty() {
+            if self.camera.listed && self.camera.devices.is_empty() && self.camera.list_error.is_none() {
                 ui.label(RichText::new("No cameras found.").size(11.0).color(FAINT));
             }
             if ui.button("Refresh").clicked() {
                 self.camera.listed = false;
+                self.camera.list_error = None;
                 self.ensure_cameras();
             }
             if let Some(choice) = pick {
@@ -442,25 +508,12 @@ impl Devices {
         if self.camera.listed {
             return;
         }
-        self.camera.listed = true;
         let result = self.camera_host.as_ref().and_then(|host| match host.try_borrow_mut() {
             Ok(mut host) => Some(host.enumerate()),
             Err(_) => None,
         });
         if let Some(result) = result {
-            match result {
-                Ok(devices) => {
-                    self.camera.devices = devices;
-                    if self.camera.devices.is_empty() && self.camera.status == DeviceStatus::Off {
-                        self.camera.status = DeviceStatus::Unavailable;
-                        self.camera.message = Some(CaptureError::Unavailable.message("camera"));
-                    } else if !self.camera.devices.is_empty() && self.camera.status == DeviceStatus::Unavailable {
-                        self.camera.status = DeviceStatus::Off;
-                        self.camera.message = None;
-                    }
-                }
-                Err(error) => self.camera.fail("camera", error),
-            }
+            self.camera.apply_list("camera", result);
         }
     }
 
@@ -527,7 +580,7 @@ impl Devices {
         egui::Popup::menu(&chev).width(250.0).show(|ui| {
             ui.label(RichText::new("Microphone").strong().size(13.0));
             status_line(ui, &self.mic, "microphone");
-            if self.mic_host.is_some() {
+            if self.mic.status == DeviceStatus::On {
                 meter_bar(ui, self.mic.level);
             }
             ui.separator();
@@ -536,20 +589,25 @@ impl Devices {
                 return;
             }
             self.ensure_mics();
+            if let Some(error) = &self.mic.list_error {
+                ui.label(RichText::new(error.message("microphone")).size(11.0).color(WARN));
+            }
             let mut pick: Option<Option<String>> = None;
             if ui.selectable_label(self.mic.selected.is_none(), "System default").clicked() {
                 pick = Some(None);
             }
-            for device in &self.mic.devices {
-                if ui.selectable_label(self.mic.selected.as_deref() == Some(device.id.as_str()), &device.name).clicked() {
+            for (i, device) in self.mic.devices.iter().enumerate() {
+                let label = device_label(&self.mic.devices, i);
+                if ui.selectable_label(self.mic.selected.as_deref() == Some(device.id.as_str()), label).clicked() {
                     pick = Some(Some(device.id.clone()));
                 }
             }
-            if self.mic.devices.is_empty() {
+            if self.mic.listed && self.mic.devices.is_empty() && self.mic.list_error.is_none() {
                 ui.label(RichText::new("No microphones found.").size(11.0).color(FAINT));
             }
             if ui.button("Refresh").clicked() {
                 self.mic.listed = false;
+                self.mic.list_error = None;
                 self.ensure_mics();
             }
             if let Some(choice) = pick {
@@ -567,25 +625,12 @@ impl Devices {
         if self.mic.listed {
             return;
         }
-        self.mic.listed = true;
         let result = self.mic_host.as_ref().and_then(|host| match host.try_borrow_mut() {
             Ok(mut host) => Some(host.enumerate()),
             Err(_) => None,
         });
         if let Some(result) = result {
-            match result {
-                Ok(devices) => {
-                    self.mic.devices = devices;
-                    if self.mic.devices.is_empty() && self.mic.status == DeviceStatus::Off {
-                        self.mic.status = DeviceStatus::Unavailable;
-                        self.mic.message = Some(CaptureError::Unavailable.message("microphone"));
-                    } else if !self.mic.devices.is_empty() && self.mic.status == DeviceStatus::Unavailable {
-                        self.mic.status = DeviceStatus::Off;
-                        self.mic.message = None;
-                    }
-                }
-                Err(error) => self.mic.fail("microphone", error),
-            }
+            self.mic.apply_list("microphone", result);
         }
     }
 
@@ -605,9 +650,20 @@ impl Devices {
         let result = match self.mic_host.as_ref().and_then(|host| host.try_borrow_mut().ok()) {
             // `MicIn::start` predates this view and reports a platform string; map the words the
             // OSes actually use to the explicit states, and keep anything else as the message.
-            Some(mut host) => host
-                .select(selected.as_deref())
-                .and_then(|()| host.start().map_err(|why| classify_audio_error(&why))),
+            Some(mut host) => {
+                // A failed switch must not leave the previous stream open: close it first. Asking
+                // for the default still reaches the host so "System default" clears a stale choice;
+                // hosts that cannot select at all report Unsupported and keep their default.
+                host.stop();
+                let prepared = match selected.as_deref() {
+                    Some(id) => host.select(Some(id)),
+                    None => match host.select(None) {
+                        Ok(()) | Err(CaptureError::Unsupported) => Ok(()),
+                        Err(error) => Err(error),
+                    },
+                };
+                prepared.and_then(|()| host.start().map_err(|why| classify_audio_error(&why)))
+            }
             None => Err(CaptureError::Unsupported),
         };
         match result {
@@ -640,7 +696,7 @@ impl Devices {
     pub(super) fn screen_button(&mut self, ui: &mut Ui, now: f64) -> bool {
         self.tick(ui.ctx(), now);
         let mut changed = false;
-        let on = self.screen.status == DeviceStatus::On;
+        let on = self.screen.is_on();
         let enabled = self.screen_host.is_some();
         let (chev, main) = split(ui, enabled, on, "Screen", "Show screen recording options");
         let main = main.on_hover_text(self.screen.status_text("screen"));
@@ -677,6 +733,11 @@ impl Devices {
                 changed = true;
                 ui.close();
             }
+            if ui.button("Refresh displays").clicked() {
+                self.screen.listed = false;
+                self.screens.clear();
+                self.ensure_screens();
+            }
         });
         if main.hovered() && !self.screen.listed {
             self.ensure_screens();
@@ -689,14 +750,20 @@ impl Devices {
         if self.screen.listed {
             return;
         }
-        self.screen.listed = true;
         let result = self.screen_host.as_ref().and_then(|host| match host.try_borrow_mut() {
             Ok(mut host) => Some(host.screens()),
             Err(_) => None,
         });
         if let Some(result) = result {
+            self.screen.listed = true;
             match result {
-                Ok(screens) => self.screens = screens,
+                Ok(screens) => {
+                    self.screens = screens;
+                    if self.screens.is_empty() && self.screen.status == DeviceStatus::Off {
+                        self.screen.status = DeviceStatus::Unavailable;
+                        self.screen.message = Some(CaptureError::Unavailable.message("screen"));
+                    }
+                }
                 Err(error) => self.screen.fail("screen", error),
             }
         }
@@ -721,8 +788,14 @@ impl Devices {
             self.screen.message = Some(CaptureError::Unavailable.message("screen"));
             return;
         };
-        let region = ScreenRegion { screen: screen.id.clone(), x: 0, y: 0, width: screen.width, height: screen.height };
-        self.start_screen_region(region);
+        let whole = ScreenRegion { screen: screen.id.clone(), x: 0, y: 0, width: screen.width, height: screen.height };
+        match whole.fit(screen) {
+            Some(region) => self.start_screen_region(region),
+            None => {
+                self.screen.status = DeviceStatus::Unavailable;
+                self.screen.message = Some("The display reports no pixels to record.".to_string());
+            }
+        }
     }
 
     fn start_screen_region(&mut self, region: ScreenRegion) {
@@ -755,7 +828,6 @@ impl Devices {
         self.screen.status = DeviceStatus::Off;
         self.screen.message = None;
         self.screen.frame_size = None;
-        self.screen_frame = None;
         self.screen.started_at = None;
     }
 
@@ -776,7 +848,7 @@ impl Devices {
         let full = ui.ctx().content_rect();
         let mut close = false;
         let mut start: Option<ScreenRegion> = None;
-        egui::Area::new(egui::Id::new("record_screen_picker")).order(egui::Order::Foreground).fixed_pos(full.min).show(ui.ctx(), |ui| {
+        egui::Area::new(egui::Id::unique("record_screen_picker")).order(egui::Order::Foreground).fixed_pos(full.min).show(ui.ctx(), |ui| {
             let (dim, _) = ui.allocate_exact_size(full.size(), Sense::click());
             ui.painter().rect_filled(dim, CornerRadius::ZERO, Color32::from_black_alpha(170));
             let panel = Rect::from_center_size(full.center(), vec2(full.width().min(520.0), full.height().min(410.0)));
@@ -851,7 +923,7 @@ impl Devices {
             child.horizontal(|ui| {
                 let whole = ScreenRegion { screen: screen.id.clone(), x: 0, y: 0, width: screen.width, height: screen.height };
                 if ui.button("Entire screen").clicked() {
-                    start = Some(whole);
+                    start = whole.fit(screen);
                 }
                 if ui.add_enabled(picker.sel.is_some(), egui::Button::new("Start recording")).clicked() {
                     if let Some(sel) = picker.sel {
@@ -915,6 +987,17 @@ fn upload_frame(state: &mut DeviceState, ctx: &egui::Context, name: &str, frame:
     match &mut state.texture {
         Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
         None => state.texture = Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR)),
+    }
+}
+
+/// A menu row's label: the name, with its position when another device shares the same name, so
+/// two identical USB interfaces are distinguishable and each has a unique accessibility label.
+fn device_label(devices: &[DeviceInfo], i: usize) -> String {
+    let Some(device) = devices.get(i) else { return String::new() };
+    if devices.iter().filter(|d| d.name == device.name).count() > 1 {
+        format!("{} ({})", device.name, i + 1)
+    } else {
+        device.name.clone()
     }
 }
 

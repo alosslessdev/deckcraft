@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::capture::{CaptureError, DeviceInfo};
 use crate::{Bytes, ClipParams, Pcm};
 
 /// An audio output device. `fill(buffer, channels, sample_rate)` is called from the device's
@@ -43,6 +44,31 @@ pub trait MicIn {
         0
     }
     fn stop(&mut self);
+
+    /// Input devices this host can open, for the Record view's device menu. A host that cannot
+    /// list them returns an empty list; the menu then says so.
+    fn enumerate(&mut self) -> Result<Vec<DeviceInfo>, CaptureError> {
+        Ok(Vec::new())
+    }
+    /// Choose the input for the next [`MicIn::start`]; `None` is the system default. Hosts that
+    /// cannot switch return [`CaptureError::Unsupported`] — selecting a device must never silently
+    /// fall back to a different one.
+    fn select(&mut self, _id: Option<&str>) -> Result<(), CaptureError> {
+        Err(CaptureError::Unsupported)
+    }
+    /// Peak level since the last call, `0..=1`. Drives the Record view's live meter; hosts that
+    /// cannot meter return zero.
+    fn level(&mut self) -> f32 {
+        0.0
+    }
+    /// Why a started stream stopped (unplugged, permission revoked), reported once.
+    fn failure(&mut self) -> Option<CaptureError> {
+        None
+    }
+    /// Whether a stream is open.
+    fn running(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

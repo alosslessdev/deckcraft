@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use deckcraft_media::AudioOut;
+use deckcraft_media::{AudioOut, CaptureError, DeviceInfo};
 
 /// The first stream error since it was last reported. cpal calls the error callback on its
 /// realtime audio thread (on ALSA in a loop while the device stays broken), which must not log:
@@ -86,11 +86,35 @@ pub struct CpalIn {
     stream: Option<cpal::Stream>,
     buf: Arc<Mutex<Capture>>,
     error: ErrorSlot,
+    /// `DeviceInfo::id` from the Record view's input menu; `None` is the system default.
+    selected: Option<String>,
 }
 
 impl Default for CpalIn {
     fn default() -> Self {
-        CpalIn { stream: None, buf: Arc::new(Mutex::new(Capture::default())), error: ErrorSlot::default() }
+        CpalIn { stream: None, buf: Arc::new(Mutex::new(Capture::default())), error: ErrorSlot::default(), selected: None }
+    }
+}
+
+/// Resolve a `DeviceInfo::id` from [`CpalIn::enumerate`] to a cpal input device. The id carries
+/// the enumeration index so two inputs with the same name stay distinct.
+fn find_input(host: &cpal::Host, id: &str) -> Result<cpal::Device, CaptureError> {
+    let index: usize = id.strip_prefix("input:").and_then(|n| n.parse().ok()).ok_or(CaptureError::Unavailable)?;
+    host.input_devices().map_err(|e| CaptureError::Failed(e.to_string()))?.nth(index).ok_or(CaptureError::Unavailable)
+}
+
+/// Platform wording for a refusal or contention, so the device control can show Denied or Busy
+/// instead of a generic failure.
+fn classify_capture_error(text: &str) -> CaptureError {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("denied") || lower.contains("permission") || lower.contains("privacy") || lower.contains("not authorized") {
+        CaptureError::Denied
+    } else if lower.contains("busy") || lower.contains("in use") || lower.contains("exclusive") {
+        CaptureError::Busy
+    } else if lower.contains("no microphone") || lower.contains("no input") || lower.contains("no device") || lower.contains("not found") {
+        CaptureError::Unavailable
+    } else {
+        CaptureError::Failed(text.to_string())
     }
 }
 
@@ -112,7 +136,11 @@ impl Drop for CpalIn {
 impl deckcraft_media::MicIn for CpalIn {
     fn start(&mut self) -> Result<(), String> {
         self.stop();
-        let dev = cpal::default_host().default_input_device().ok_or_else(|| "no microphone".to_string())?;
+        let host = cpal::default_host();
+        let dev = match &self.selected {
+            Some(id) => find_input(&host, id).map_err(|e| e.message("microphone"))?,
+            None => host.default_input_device().ok_or_else(|| "no microphone".to_string())?,
+        };
         let cfg = dev.default_input_config().map_err(|e| e.to_string())?;
         let channels = cfg.channels() as usize;
         let rate = cfg.sample_rate().0;
@@ -181,6 +209,41 @@ impl deckcraft_media::MicIn for CpalIn {
         self.stream = None;
         self.report();
         self.buf.lock().unwrap_or_else(PoisonError::into_inner).samples.clear();
+    }
+
+    fn enumerate(&mut self) -> Result<Vec<DeviceInfo>, CaptureError> {
+        let host = cpal::default_host();
+        let devices = host.input_devices().map_err(|e| CaptureError::Failed(e.to_string()))?;
+        let mut out = Vec::new();
+        for (i, dev) in devices.enumerate() {
+            let name = dev.name().unwrap_or_else(|_| format!("Input {}", i + 1));
+            out.push(DeviceInfo::new(format!("input:{i}"), name));
+        }
+        Ok(out)
+    }
+
+    fn select(&mut self, id: Option<&str>) -> Result<(), CaptureError> {
+        let Some(id) = id else {
+            self.selected = None;
+            return Ok(());
+        };
+        let host = cpal::default_host();
+        find_input(&host, id)?;
+        self.selected = Some(id.to_string());
+        Ok(())
+    }
+
+    fn level(&mut self) -> f32 {
+        let g = self.buf.lock().unwrap_or_else(PoisonError::into_inner);
+        g.samples.iter().rev().take(2048).fold(0.0f32, |peak, s| peak.max(s.abs())).clamp(0.0, 1.0)
+    }
+
+    fn failure(&mut self) -> Option<CaptureError> {
+        take_stream_error(&self.error).map(|e| classify_capture_error(&e))
+    }
+
+    fn running(&self) -> bool {
+        self.stream.is_some()
     }
 }
 

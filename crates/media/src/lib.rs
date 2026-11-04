@@ -6,10 +6,14 @@
 //!   track of MP4/MOV/WebM videos. WMA (ASF) is recognised and probed but not decoded.
 //! - [`video::VideoDecoder`]: H.264, HEVC, VP9 and AV1 in MP4/MOV and WebM/Matroska to RGBA
 //!   [`video::Frame`]s (our own decoders, ported from FilmCraft); [`video::poster_png`].
+//! - [`capture`]: camera and screen capture hosts — device lists, typed refusals (unavailable,
+//!   denied, busy) and non-blocking frames — with no platform API in this crate.
 //! - [`clip::ClipParams`]: trim, fade in/out and volume.
 //! - [`player::Player`]: the playback mixer and clock the UI host drives, over an
 //!   [`player::AudioOut`] it injects (cpal on desktop; none on the web or in tests, where the clock
-//!   runs on wall time); a [`player::MicIn`] captures narration. [`feed::VideoFeed`] decodes video
+//!   runs on wall time); a [`player::MicIn`] captures narration and drives the Record view's
+//!   microphone menu and meter; [`capture`] holds the camera and screen-capture traits the same
+//!   view drives. [`feed::VideoFeed`] decodes video
 //!   ahead of that clock. [`audio::wav_mono`] writes 16-bit mono WAV.
 //!
 //! Layer L2: depends only on the codec crates, never on the model or the UI. Builds for
