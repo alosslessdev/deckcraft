@@ -40,7 +40,7 @@ const OFF_LABEL: Color32 = Color32::from_gray(190);
 /// point so its geometry can be exercised without the shell's pointer plumbing.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Grab {
+pub(crate) enum Grab {
     Move,
     Resize,
 }
