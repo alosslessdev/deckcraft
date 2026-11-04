@@ -10,7 +10,7 @@
 
 mod bottom;
 mod canvas;
-mod devices;
+pub(super) mod devices;
 mod notes;
 mod top;
 mod views;
@@ -85,7 +85,9 @@ pub(crate) struct RecordView {
     pub(super) notes_open: bool,
     /// Selected record view. Defined in [`views`] so the dropdown and the shell share it.
     pub(super) view: views::ViewKind,
+    #[allow(dead_code)]
     pub(super) views_open: bool,
+    #[allow(dead_code)]
     pub(super) more_open: bool,
     pub(super) ink: InkState,
     pub(super) devices: devices::Devices,
@@ -242,6 +244,7 @@ pub(crate) struct Layout {
     /// Camera-preview icon, left of the Views dropdown.
     pub camera_preview: Rect,
     /// Presenter view's next-slide strip, below the notes pane. None in the other views.
+    #[allow(dead_code)]
     pub next: Option<Rect>,
 }
 

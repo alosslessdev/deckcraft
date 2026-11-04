@@ -29,6 +29,7 @@ pub(super) const INK_COLORS: [Color32; 10] = [
 ];
 
 pub(super) struct Out {
+    #[allow(dead_code)]
     pub keep: bool,
 }
 
