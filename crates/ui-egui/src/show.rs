@@ -811,7 +811,8 @@ fn take_narration(app: &mut SlideApp, show: &mut Show) {
     if !show.record || !show.mic_ok {
         return;
     }
-    let Some(mic) = app.services.mic.as_mut() else { return };
+    let Some(host) = app.services.mic.as_ref() else { return };
+    let Ok(mut mic) = host.try_borrow_mut() else { return };
     let (rate, samples) = mic.take();
     if let Some(wav) = narration_wav(rate, &samples) {
         let slide = show.state.slide;

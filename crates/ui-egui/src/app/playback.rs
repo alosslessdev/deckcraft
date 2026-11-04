@@ -30,7 +30,9 @@ impl SlideApp {
     /// Stop the microphone, if the host gave us one. Recording ends through here so a
     /// half-captured clip is dropped rather than left running.
     pub(crate) fn stop_mic(&mut self) {
-        if let Some(mic) = self.services.mic.as_mut() {
+        if let Some(host) = self.services.mic.as_ref()
+            && let Ok(mut mic) = host.try_borrow_mut()
+        {
             mic.stop();
         }
     }

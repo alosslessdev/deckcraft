@@ -80,15 +80,23 @@ pub fn ui(app: &mut SlideApp, ui: &mut Ui) {
     begin_show(&ctx, &mut show, &doc, now, app.services.presenter.is_some());
     if show.record && show.record_view.status == record::RecordStatus::Recording && !show.mic_tried {
         show.mic_tried = true;
-        match app.services.mic.as_mut() {
-            Some(mic) => match mic.start() {
-                Ok(()) => show.mic_ok = true,
-                Err(e) => {
-                    log::info!("record narration: {e}");
-                    show.mic_ok = false;
+        match app.services.mic.as_ref().map(|host| host.try_borrow_mut()) {
+            Some(Ok(mut mic)) => {
+                // The Record view's microphone toggle may already have the stream open; do not
+                // restart it (that would drop the take) just because Record was pressed.
+                if mic.running() {
+                    show.mic_ok = true;
+                } else {
+                    match mic.start() {
+                        Ok(()) => show.mic_ok = true,
+                        Err(e) => {
+                            log::info!("record narration: {e}");
+                            show.mic_ok = false;
+                        }
+                    }
                 }
-            },
-            None => show.mic_ok = false,
+            }
+            _ => show.mic_ok = false,
         }
     }
     let editing = show.record && record::notes_has_focus(&ctx);

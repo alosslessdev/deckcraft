@@ -146,6 +146,8 @@ impl DeviceState {
         self.message = Some(message);
         self.started_at = None;
         self.level = 0.0;
+        self.texture = None;
+        self.frame_size = None;
     }
 
     /// The one-line status shown in the menu and on hover.
@@ -197,6 +199,9 @@ pub(super) struct Devices {
     /// Latest camera frame, uploaded once by [`Devices::tick`].
     camera_frame: Option<CaptureFrame>,
     last_tick: f64,
+    /// The camera on/off state the shell was last told about, so a poll-driven stop also
+    /// reaches `RecordView.camera_bubble`.
+    camera_reported_on: bool,
 }
 
 impl Default for Devices {
@@ -212,6 +217,7 @@ impl Default for Devices {
             picker: None,
             camera_frame: None,
             last_tick: f64::NEG_INFINITY,
+            camera_reported_on: false,
         }
     }
 }
@@ -329,7 +335,8 @@ impl Devices {
         let Some(host) = &self.camera_host else { return };
         let (failure, frame, running) = match host.try_borrow_mut() {
             Ok(mut host) => (host.failure(), host.frame(), host.running()),
-            Err(_) => (None, None, false),
+            // Borrowed elsewhere this frame: no evidence about the stream, retry next frame.
+            Err(_) => return,
         };
         if let Some(error) = failure {
             self.camera_frame = None;
@@ -341,7 +348,7 @@ impl Devices {
             self.camera.fail("camera", error);
             return;
         }
-        if let Some(frame) = frame {
+        if let Some(frame) = frame.filter(|f| f.width > 0 && f.height > 0) {
             if self.camera.status == DeviceStatus::Starting {
                 self.camera.status = DeviceStatus::On;
                 self.camera.message = None;
@@ -359,7 +366,9 @@ impl Devices {
                     && now - started > 8.0
                     && !running
                 {
-                    self.camera.stop_failed("camera", "The camera did not start.");
+                    let was_live = self.camera.status == DeviceStatus::On;
+                    self.stop_camera();
+                    self.camera.message = Some(if was_live { "The camera stopped." } else { "The camera did not start." }.to_string());
                 }
             }
             _ => {}
@@ -370,7 +379,9 @@ impl Devices {
         let Some(host) = &self.mic_host else { return };
         let (failure, level, running) = match host.try_borrow_mut() {
             Ok(mut host) => (host.failure(), host.level(), host.running()),
-            Err(_) => (None, 0.0, true),
+            // A host borrowed elsewhere this frame (the show may be draining it) is not
+            // evidence of a running stream: leave the status alone and retry next frame.
+            Err(_) => (None, 0.0, false),
         };
         if let Some(error) = failure {
             self.mic.level = 0.0;
@@ -448,7 +459,9 @@ impl Devices {
     /// The camera split button. Returns whether the on/off state changed (for the shell's bubble).
     pub(super) fn camera_button(&mut self, ui: &mut Ui, now: f64) -> bool {
         self.tick(ui.ctx(), now);
-        let mut changed = false;
+        let on_now = self.camera.is_on();
+        let mut changed = on_now != self.camera_reported_on;
+        self.camera_reported_on = on_now;
         let enabled = self.camera_host.is_some();
         let (chev, main) = split(ui, enabled, self.camera.is_on(), "Camera", "Show cameras");
         let main = main.on_hover_text(self.camera.status_text("camera"));
@@ -513,6 +526,7 @@ impl Devices {
             Err(_) => None,
         });
         if let Some(result) = result {
+            self.camera.listed = true;
             self.camera.apply_list("camera", result);
         }
     }
@@ -553,6 +567,7 @@ impl Devices {
         self.camera.status = DeviceStatus::Off;
         self.camera.message = None;
         self.camera.frame_size = None;
+        self.camera.texture = None;
         self.camera_frame = None;
         self.camera.started_at = None;
     }
@@ -630,6 +645,7 @@ impl Devices {
             Err(_) => None,
         });
         if let Some(result) = result {
+            self.mic.listed = true;
             self.mic.apply_list("microphone", result);
         }
     }
