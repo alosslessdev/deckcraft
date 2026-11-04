@@ -76,10 +76,7 @@ pub(super) fn ui(ui: &mut Ui, show: &mut Show, rec: &mut RecordView, doc: &Arc<P
     });
 
     // Navigation row and progress.
-    let nav_row = egui::Rect::from_min_max(
-        egui::pos2(rect.min.x + 180.0, rect.min.y + 48.0),
-        egui::pos2(rect.max.x - 180.0, rect.min.y + 82.0),
-    );
+    let nav_row = egui::Rect::from_min_max(egui::pos2(rect.min.x + 180.0, rect.min.y + 48.0), egui::pos2(rect.max.x - 180.0, rect.min.y + 82.0));
     let mut nav = ui.new_child(UiBuilder::new().max_rect(nav_row));
     nav.visuals_mut().override_text_color = Some(Color32::from_gray(225));
     nav.with_layout(EguiLayout::left_to_right(Align::Center), |ui| {

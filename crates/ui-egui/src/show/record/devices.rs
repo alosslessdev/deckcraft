@@ -13,19 +13,18 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use egui::{Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2, pos2, vec2};
 use deckcraft_media::{CameraIn, CaptureError, CaptureFrame, DeviceInfo, MicIn, ScreenIn, ScreenInfo, ScreenRegion};
+use egui::{Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2, pos2, vec2};
 
-use super::{RecordView, theme};
+use super::RecordView;
 use crate::Services;
+use crate::theme;
 
 const FG: Color32 = Color32::from_gray(226);
 const DIM: Color32 = Color32::from_gray(150);
 const FAINT: Color32 = Color32::from_gray(110);
 const ACCENT: Color32 = Color32::from_rgb(96, 176, 238);
-const LIVE: Color32 = Color32::from_rgb(224, 62, 62);
 const WARN: Color32 = Color32::from_rgb(230, 168, 58);
-const PANEL: Color32 = Color32::from_rgb(38, 38, 42);
 const PANEL_BORDER: Color32 = Color32::from_gray(72);
 
 /// The explicit state of one capture control. `Unavailable`, `Denied` and `Busy` are never
@@ -270,18 +269,21 @@ impl Devices {
     }
 
     /// Attach a camera host directly (tests and the web app). The host starts Off.
+    #[cfg(test)]
     pub(super) fn attach_camera(&mut self, host: Box<dyn CameraIn>) {
         self.camera_host = Some(Rc::new(RefCell::new(host)));
         self.camera.status = DeviceStatus::Off;
         self.camera.message = None;
     }
 
+    #[cfg(test)]
     pub(super) fn attach_mic(&mut self, host: Box<dyn MicIn>) {
         self.mic_host = Some(Rc::new(RefCell::new(host)));
         self.mic.status = DeviceStatus::Off;
         self.mic.message = None;
     }
 
+    #[cfg(test)]
     pub(super) fn attach_screen(&mut self, host: Box<dyn ScreenIn>) {
         self.screen_host = Some(Rc::new(RefCell::new(host)));
         self.screen.status = DeviceStatus::Off;
@@ -290,13 +292,19 @@ impl Devices {
         self.screens.clear();
     }
 
-    /// The latest camera picture, when the preview is visible. The texture is uploaded by
-    /// [`Devices::tick`] (called from the top-bar buttons) so a section can paint with `&RecordView`.
+    /// The latest camera picture, when the preview is visible. The canvas section calls this;
+    /// this branch has no consumer yet, so the dead-code warning is allowed rather than faking
+    /// a preview in the shell.
+    /// [`Devices::tick`] (called from the top-bar buttons) uploads it, so a section can paint with
+    /// `&RecordView`.
+    #[allow(dead_code)]
     pub(super) fn camera_texture(&self) -> Option<&TextureHandle> {
         self.camera.texture.as_ref()
     }
 
     /// Paint the camera bubble's picture into `rect`, or a muted placeholder when there is none.
+    /// The canvas section calls this when it takes the bubble over.
+    #[allow(dead_code)]
     pub(super) fn paint_camera_preview(&self, ui: &Ui, rect: Rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(8), Color32::from_gray(24));
@@ -405,10 +413,7 @@ impl Devices {
         } else {
             self.mic.level = 0.0;
         }
-        if self.mic.status == DeviceStatus::On
-            && !running
-            && self.mic.started_at.is_some_and(|started| now - started > 0.3)
-        {
+        if self.mic.status == DeviceStatus::On && !running && self.mic.started_at.is_some_and(|started| now - started > 0.3) {
             self.mic.stop_failed("microphone", "The microphone stopped.");
         }
     }
@@ -933,6 +938,9 @@ impl Devices {
             {
                 picker.sel = None;
             }
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
             if let Some(msg) = &picker.message {
                 child.label(RichText::new(msg).size(11.0).color(WARN));
             }
@@ -955,6 +963,10 @@ impl Devices {
             self.start_screen_region(region);
             if self.screen.status == DeviceStatus::Starting || self.screen.status == DeviceStatus::On {
                 close = true;
+            } else {
+                // The picker owns the interaction here, so `start_screen_region` could not
+                // store the refusal (the picker was taken out of `self`). Show it in the panel.
+                picker.message = self.screen.message.clone();
             }
         }
         if close {
@@ -995,6 +1007,10 @@ fn classify_audio_error(text: &str) -> CaptureError {
 }
 
 fn upload_frame(state: &mut DeviceState, ctx: &egui::Context, name: &str, frame: CaptureFrame) {
+    // A zero extent would reach wgpu, which rejects it; treat it as no picture at all.
+    if frame.width == 0 || frame.height == 0 {
+        return;
+    }
     let expected = (frame.width as usize).checked_mul(frame.height as usize).and_then(|n| n.checked_mul(4));
     if expected != Some(frame.rgba.len()) {
         return;
@@ -1010,11 +1026,7 @@ fn upload_frame(state: &mut DeviceState, ctx: &egui::Context, name: &str, frame:
 /// two identical USB interfaces are distinguishable and each has a unique accessibility label.
 fn device_label(devices: &[DeviceInfo], i: usize) -> String {
     let Some(device) = devices.get(i) else { return String::new() };
-    if devices.iter().filter(|d| d.name == device.name).count() > 1 {
-        format!("{} ({})", device.name, i + 1)
-    } else {
-        device.name.clone()
-    }
+    if devices.iter().filter(|d| d.name == device.name).count() > 1 { format!("{} ({})", device.name, i + 1) } else { device.name.clone() }
 }
 
 /// The two halves of a device split button: the chevron and the label. The parent lays out
@@ -1024,10 +1036,7 @@ fn split(ui: &mut Ui, enabled: bool, on: bool, label: &str, chevron_tip: &str) -
     let chev = ui.add(egui::Button::new(RichText::new("▾").size(11.0).color(if on { ACCENT } else { DIM })).frame(false));
     chev.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, chevron_tip));
     let chev = chev.on_hover_text(chevron_tip);
-    let main = ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(label).size(13.0).color(color)).frame(false),
-    );
+    let main = ui.add_enabled(enabled, egui::Button::new(RichText::new(label).size(13.0).color(color)).frame(false));
     main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     (chev, main)
 }
@@ -1440,10 +1449,7 @@ mod tests {
         devices.open_picker();
         assert!(devices.picker.is_some());
         devices.start_entire_screen();
-        assert_eq!(
-            log.borrow().started,
-            vec![ScreenRegion { screen: "s1".into(), x: 0, y: 0, width: 1920, height: 1080 }]
-        );
+        assert_eq!(log.borrow().started, vec![ScreenRegion { screen: "s1".into(), x: 0, y: 0, width: 1920, height: 1080 }]);
         assert_eq!(devices.screen.status, DeviceStatus::Starting);
         log.borrow_mut().running = true;
         devices.poll(1.1);
@@ -1478,10 +1484,7 @@ mod tests {
     fn a_normalized_picker_drag_becomes_physical_pixels_on_that_monitor() {
         let screen = ScreenInfo { id: "s1".into(), name: "Display".into(), width: 1920, height: 1080 };
         let sel = Rect::from_min_max(pos2(0.25, 0.5), pos2(0.5, 0.75));
-        assert_eq!(
-            region_from_sel(&screen, sel),
-            Some(ScreenRegion { screen: "s1".into(), x: 480, y: 540, width: 480, height: 270 })
-        );
+        assert_eq!(region_from_sel(&screen, sel), Some(ScreenRegion { screen: "s1".into(), x: 480, y: 540, width: 480, height: 270 }));
         let tiny = Rect::from_min_max(pos2(0.5, 0.5), pos2(0.5, 0.5));
         assert_eq!(region_from_sel(&screen, tiny), None);
     }

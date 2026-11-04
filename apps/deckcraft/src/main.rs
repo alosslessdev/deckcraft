@@ -136,9 +136,9 @@ fn services() -> Services {
         // The Record view and the recording show share one input stream; its device list and
         // live meter come from the same host. `DECKCRAFT_NO_AUDIO` keeps audio devices away on a
         // headless machine.
-        mic: std::env::var_os("DECKCRAFT_NO_AUDIO").is_none().then(|| {
-            std::rc::Rc::new(std::cell::RefCell::new(Box::new(audio::CpalIn::default()) as Box<dyn deckcraft_media::MicIn>))
-        }),
+        mic: std::env::var_os("DECKCRAFT_NO_AUDIO")
+            .is_none()
+            .then(|| std::rc::Rc::new(std::cell::RefCell::new(Box::new(audio::CpalIn::default()) as Box<dyn deckcraft_media::MicIn>))),
         ..Default::default()
     }
 }
