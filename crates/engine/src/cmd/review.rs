@@ -1307,6 +1307,7 @@ mod tests {
     use serde_json::json;
 
     use crate::Session;
+    use crate::cmd::base64_encode;
     use crate::sample::open_sample;
 
     #[test]
@@ -1633,6 +1634,7 @@ mod tests {
         assert!(s.execute("show.clearNarration", &json!({"index": 99})).is_err());
     }
 
+    #[test]
     fn delete_rejects_an_invalid_index_and_keeps_the_comments() {
         let mut s = Session::with_new();
         s.execute("comment.add", &json!({"text": "a"})).unwrap();
